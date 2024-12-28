@@ -2,6 +2,9 @@ import streamlit as st
 from snowflake.snowpark import Session
 import pandas as pd
 import json
+from trulens_core import Tru
+from trulens_feedback import Feedback
+from trulens_providers_cortex import CortexProvider
 
 # -------------------------
 # 🎯 Page Configuration (MUST be first Streamlit call)
@@ -11,6 +14,13 @@ st.set_page_config(
     page_icon="",
     layout="wide"
 )
+
+# -------------------------
+# 🎯 Initialize TruLens
+# -------------------------
+tru = Tru()
+provider = CortexProvider()
+feedback = Feedback()
 
 # -------------------------
 # 🎯 Snowflake Connection
@@ -33,9 +43,9 @@ session = get_session()
 # 🎯 Constants
 # -------------------------
 IRS_COLORS = {
-    "primary": "#004b87",  # IRS Blue
-    "secondary": "#ffffff",  # White
-    "accent": "#ffd700"  # Gold
+    "primary": "#004b87",
+    "secondary": "#ffffff",
+    "accent": "#ffd700"
 }
 
 NUM_CHUNKS = 3
@@ -149,6 +159,17 @@ def main():
         
         st.subheader("Response")
         st.write(response)
+        
+        # TruLens Logging
+        tru.record(
+            question=question,
+            response=response,
+            metadata={
+                "model": st.session_state.model_name,
+                "use_context": st.session_state.use_context,
+                "category": st.session_state.category_value
+            }
+        )
         
         if st.session_state.use_context:
             st.sidebar.subheader("Related Documents")
