@@ -8,7 +8,7 @@ from trulens.feedback.groundtruth import GroundTruthAggregator
 from trulens.providers.cortex import CortexProvider
 
 # -------------------------
-# Page Configuration
+# Page Configuration (MUST be the first Streamlit call)
 # -------------------------
 st.set_page_config(
     page_title="Money for Nothin",
@@ -37,15 +37,16 @@ def get_session():
         "role": st.secrets["snowflake"]["role"]
     }).create()
 
+
 session = get_session()
 
 # -------------------------
 # Constants
 # -------------------------
 IRS_COLORS = {
-    "primary": "#004b87",
-    "secondary": "#ffffff",
-    "accent": "#ffd700"
+    "primary": "#004b87",  # IRS Blue
+    "secondary": "#ffffff",  # White
+    "accent": "#ffd700"  # Gold
 }
 
 NUM_CHUNKS = 3
@@ -149,6 +150,11 @@ def main():
     # Sidebar Configurations
     config_options()
     
+    # Display Available Documents
+    st.subheader("Available Documents")
+    docs_available = session.sql("LS @docs").collect()
+    st.write(pd.DataFrame([doc["name"] for doc in docs_available], columns=["Document Name"]))
+    
     # Chat Interface
     question = st.text_input("Ask a tax-related question:", placeholder="Enter your question here")
     
@@ -174,14 +180,13 @@ def main():
             feedback=provider.evaluate_response(response)
         )
         
-        # Display Related Document Link
         if st.session_state.use_context:
-            st.subheader("Relevant IRS Publication")
+            st.sidebar.subheader("Related Documents")
             similar_chunks = get_similar_chunks(question)
             for chunk in similar_chunks:
                 cmd = f"SELECT GET_PRESIGNED_URL(@docs, '{chunk.relative_path}', 360) AS URL_LINK"
                 df_url = session.sql(cmd).to_pandas()
-                st.markdown(f"[Read the full IRS Publication here]({df_url.iloc[0]['URL_LINK']})")
+                st.sidebar.write(f"[{chunk.relative_path}]({df_url.iloc[0]['URL_LINK']})")
 
 
 # -------------------------
