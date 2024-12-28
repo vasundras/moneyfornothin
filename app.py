@@ -2,9 +2,10 @@ import streamlit as st
 from snowflake.snowpark import Session
 import pandas as pd
 import json
-from trulens_core import Tru
-from trulens_feedback import Feedback
-from trulens_providers_cortex import CortexProvider
+from trulens.core import Tru
+from trulens.feedback.llm_provider import LLMProvider
+from trulens.feedback.groundtruth import GroundTruthAggregator
+from trulens.providers.cortex import CortexProvider
 
 # -------------------------
 # 🎯 Page Configuration (MUST be first Streamlit call)
@@ -160,16 +161,20 @@ def main():
         st.subheader("Response")
         st.write(response)
         
-        # TruLens Logging
-        tru.record(
-            question=question,
-            response=response,
-            metadata={
-                "model": st.session_state.model_name,
-                "use_context": st.session_state.use_context,
-                "category": st.session_state.category_value
-            }
-        )
+    # TruLens Logging with LLMProvider
+    provider = LLMProvider()
+    ground_truth = GroundTruthAggregator()
+
+    tru.record(
+        question=question,
+        response=response,
+        metadata={
+            "model": st.session_state.model_name,
+            "use_context": st.session_state.use_context,
+            "category": st.session_state.category_value
+        },
+    feedback=provider.evaluate_response(response)
+)
         
         if st.session_state.use_context:
             st.sidebar.subheader("Related Documents")
