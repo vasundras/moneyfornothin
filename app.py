@@ -4,19 +4,17 @@ import pandas as pd
 import json
 
 # -------------------------
-# 🎯 Configuration
+# 🎯 Page Configuration (MUST be first Streamlit call)
 # -------------------------
-IRS_COLORS = {
-    "primary": "#004b87",
-    "secondary": "#ffffff",
-    "accent": "#ffd700"
-}
+st.set_page_config(
+    page_title="Money for Nothin",
+    page_icon="",
+    layout="wide"
+)
 
-# Constants
-NUM_CHUNKS = 3
-COLUMNS = ["chunk", "relative_path", "category"]
-
-# Snowflake Connection
+# -------------------------
+# 🎯 Snowflake Connection
+# -------------------------
 @st.cache_resource
 def get_session():
     return Session.builder.configs({
@@ -30,19 +28,33 @@ def get_session():
     }).create()
 
 session = get_session()
-svc = session.sql("SELECT * FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE")
+
+# -------------------------
+# 🎯 Constants
+# -------------------------
+IRS_COLORS = {
+    "primary": "#004b87",  # IRS Blue
+    "secondary": "#ffffff",  # White
+    "accent": "#ffd700"  # Gold
+}
+
+NUM_CHUNKS = 3
+COLUMNS = ["chunk", "relative_path", "category"]
 
 # -------------------------
 # 🎯 Sidebar Configuration
 # -------------------------
 def config_options():
-    st.sidebar.title("🔧 Configuration")
+    st.sidebar.title("Configuration")
+    
+    st.sidebar.subheader("Model Selection")
     st.sidebar.selectbox(
-        'Select your model:',
+        'Choose your model:',
         ['mistral-7b', 'mistral-large', 'mistral-large2'],
         key="model_name"
     )
     
+    st.sidebar.subheader("Category Filter")
     categories = session.sql("SELECT DISTINCT category FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE").collect()
     cat_list = ['ALL'] + [cat.CATEGORY for cat in categories]
     st.sidebar.selectbox(
@@ -51,6 +63,7 @@ def config_options():
         key="category_value"
     )
     
+    st.sidebar.subheader("Context Toggle")
     st.sidebar.checkbox('Use document context?', key='use_context')
 
 # -------------------------
@@ -58,9 +71,18 @@ def config_options():
 # -------------------------
 def get_similar_chunks(query):
     if st.session_state.category_value == "ALL":
-        response = session.sql(f"SELECT * FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE LIMIT {NUM_CHUNKS}").collect()
+        response = session.sql(f"""
+            SELECT * 
+            FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE 
+            LIMIT {NUM_CHUNKS}
+        """).collect()
     else:
-        response = session.sql(f"SELECT * FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE WHERE category='{st.session_state.category_value}' LIMIT {NUM_CHUNKS}").collect()
+        response = session.sql(f"""
+            SELECT * 
+            FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE 
+            WHERE category = '{st.session_state.category_value}' 
+            LIMIT {NUM_CHUNKS}
+        """).collect()
     return response
 
 # -------------------------
@@ -76,6 +98,9 @@ def create_prompt(question):
         When answering the question contained between <question> and </question> tags,
         be concise and do not hallucinate.
         If you don't have the information, just say so.
+        Only answer the question if you can extract it from the CONTEXT provided.
+
+        Recommend relevant tax forms when applicable.
 
         <context>
         {prompt_context}
@@ -87,6 +112,7 @@ def create_prompt(question):
         """
     else:
         prompt = f"Question: {question}\nAnswer:"
+    
     return prompt
 
 # -------------------------
@@ -102,29 +128,35 @@ def complete(question):
 # 🎯 Main App
 # -------------------------
 def main():
-    st.set_page_config(
-        page_title="IRS Tax Chat Assistant",
-        page_icon="🧾",
-        layout="wide"
-    )
-    
-    st.title("🧾 IRS Tax Chat Assistant")
+    st.title("Money for Nothin")
+    st.subheader("And Tax Advice for Free")
     st.write("Ask tax-related questions and receive accurate answers sourced directly from IRS documents.")
     
+    # Sidebar Configurations
     config_options()
     
-    st.write("### 📑 Available Documents")
+    # Display Available Documents
+    st.subheader("Available Documents")
     docs_available = session.sql("LS @docs").collect()
     st.write(pd.DataFrame([doc["name"] for doc in docs_available], columns=["Document Name"]))
     
+    # Chat Interface
     question = st.text_input("Ask a tax-related question:", placeholder="Enter your question here")
     
     if question:
-        with st.spinner("Thinking..."):
+        with st.spinner("Processing your question..."):
             response = complete(question)
         
-        st.markdown("### 🤖 **Answer:**")
-        st.markdown(response)
+        st.subheader("Response")
+        st.write(response)
+        
+        if st.session_state.use_context:
+            st.sidebar.subheader("Related Documents")
+            similar_chunks = get_similar_chunks(question)
+            for chunk in similar_chunks:
+                cmd = f"SELECT GET_PRESIGNED_URL(@docs, '{chunk.relative_path}', 360) AS URL_LINK"
+                df_url = session.sql(cmd).to_pandas()
+                st.sidebar.write(f"[{chunk.relative_path}]({df_url.iloc[0]['URL_LINK']})")
 
 # -------------------------
 # 🎯 Run the App
