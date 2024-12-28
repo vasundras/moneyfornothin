@@ -8,7 +8,7 @@ from trulens.feedback.groundtruth import GroundTruthAggregator
 from trulens.providers.cortex import CortexProvider
 
 # -------------------------
-# 🎯 Page Configuration (MUST be first Streamlit call)
+# Page Configuration
 # -------------------------
 st.set_page_config(
     page_title="Money for Nothin",
@@ -17,14 +17,13 @@ st.set_page_config(
 )
 
 # -------------------------
-# 🎯 Initialize TruLens
+# Initialize TruLens
 # -------------------------
 tru = Tru()
 provider = CortexProvider()
-feedback = Feedback()
 
 # -------------------------
-# 🎯 Snowflake Connection
+# Snowflake Connection
 # -------------------------
 @st.cache_resource
 def get_session():
@@ -41,7 +40,7 @@ def get_session():
 session = get_session()
 
 # -------------------------
-# 🎯 Constants
+# Constants
 # -------------------------
 IRS_COLORS = {
     "primary": "#004b87",
@@ -53,7 +52,7 @@ NUM_CHUNKS = 3
 COLUMNS = ["chunk", "relative_path", "category"]
 
 # -------------------------
-# 🎯 Sidebar Configuration
+# Sidebar Configuration
 # -------------------------
 def config_options():
     st.sidebar.title("Configuration")
@@ -77,8 +76,9 @@ def config_options():
     st.sidebar.subheader("Context Toggle")
     st.sidebar.checkbox('Use document context?', key='use_context')
 
+
 # -------------------------
-# 🎯 Retrieval Logic
+# Retrieval Logic
 # -------------------------
 def get_similar_chunks(query):
     if st.session_state.category_value == "ALL":
@@ -96,8 +96,9 @@ def get_similar_chunks(query):
         """).collect()
     return response
 
+
 # -------------------------
-# 🎯 Prompt Creation
+# Prompt Creation
 # -------------------------
 def create_prompt(question):
     if st.session_state.use_context:
@@ -126,8 +127,9 @@ def create_prompt(question):
     
     return prompt
 
+
 # -------------------------
-# 🎯 Completion Logic
+# Completion Logic
 # -------------------------
 def complete(question):
     prompt = create_prompt(question)
@@ -135,21 +137,17 @@ def complete(question):
     df_response = session.sql(cmd, params=[st.session_state.model_name, prompt]).collect()
     return df_response[0]['RESPONSE']
 
+
 # -------------------------
-# 🎯 Main App
+# Main App
 # -------------------------
 def main():
     st.title("Money for Nothin")
-    st.subheader("And Tax Advice for Free")
+    st.markdown("*And Tax Advice for Free*")
     st.write("Ask tax-related questions and receive accurate answers sourced directly from IRS documents.")
     
     # Sidebar Configurations
     config_options()
-    
-    # Display Available Documents
-    st.subheader("Available Documents")
-    docs_available = session.sql("LS @docs").collect()
-    st.write(pd.DataFrame([doc["name"] for doc in docs_available], columns=["Document Name"]))
     
     # Chat Interface
     question = st.text_input("Ask a tax-related question:", placeholder="Enter your question here")
@@ -161,31 +159,33 @@ def main():
         st.subheader("Response")
         st.write(response)
         
-    # TruLens Logging with LLMProvider
-    provider = LLMProvider()
-    ground_truth = GroundTruthAggregator()
+        # TruLens Logging with LLMProvider
+        provider = LLMProvider()
+        ground_truth = GroundTruthAggregator()
 
-    tru.record(
-        question=question,
-        response=response,
-        metadata={
-            "model": st.session_state.model_name,
-            "use_context": st.session_state.use_context,
-            "category": st.session_state.category_value
-        },
-    feedback=provider.evaluate_response(response)
-)
+        tru.record(
+            question=question,
+            response=response,
+            metadata={
+                "model": st.session_state.model_name,
+                "use_context": st.session_state.use_context,
+                "category": st.session_state.category_value
+            },
+            feedback=provider.evaluate_response(response)
+        )
         
+        # Display Related Document Link
         if st.session_state.use_context:
-            st.sidebar.subheader("Related Documents")
+            st.subheader("Relevant IRS Publication")
             similar_chunks = get_similar_chunks(question)
             for chunk in similar_chunks:
                 cmd = f"SELECT GET_PRESIGNED_URL(@docs, '{chunk.relative_path}', 360) AS URL_LINK"
                 df_url = session.sql(cmd).to_pandas()
-                st.sidebar.write(f"[{chunk.relative_path}]({df_url.iloc[0]['URL_LINK']})")
+                st.markdown(f"[Read the full IRS Publication here]({df_url.iloc[0]['URL_LINK']})")
+
 
 # -------------------------
-# 🎯 Run the App
+# Run the App
 # -------------------------
 if __name__ == "__main__":
     main()
