@@ -5,9 +5,6 @@ import json
 import os
 import threading
 from trulens.core import Tru
-from trulens.feedback.llm_provider import LLMProvider
-from mistralai.client import MistralClient
-from mistralai.models.chat_completion import ChatMessage
 
 # -------------------------
 # Page Configuration
@@ -18,28 +15,9 @@ st.set_page_config(
 )
 
 # -------------------------
-# Initialize Mistral Client and TruLens
+# Initialize TruLens
 # -------------------------
-mistral_client = MistralClient(api_key="I8JjRl93ZLqCjuHh0mKVcNqigOvSgyFf")
 tru = Tru()
-
-# Custom Mistral Provider Class
-class MistralProvider:
-    def __init__(self, client):
-        self.client = client
-    
-    def completion(self, prompt):
-        messages = [ChatMessage(role="user", content=prompt)]
-        response = self.client.chat(
-            model="mistral-large-2",
-            messages=messages
-        )
-        return response.messages[0].content
-
-# Initialize provider with custom Mistral implementation
-provider = LLMProvider(
-    llm=MistralProvider(mistral_client)
-)
 
 # -------------------------
 # Snowflake Connection
