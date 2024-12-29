@@ -5,14 +5,6 @@ import json
 import os
 import threading
 
-# TruLens Imports
-from trulens.core import TruSession
-from trulens.connectors.snowflake import SnowflakeConnector
-from trulens.apps.custom import instrument, TruCustomApp
-from trulens.providers.cortex.provider import Cortex
-from trulens.core import Feedback, Select
-import numpy as np
-
 # -------------------------
 # Page Configuration
 # -------------------------
@@ -36,118 +28,20 @@ def get_session():
         "role": st.secrets["snowflake"]["role"]
     }).create()
 
+
 session = get_session()
 
 # -------------------------
-# TruLens Configuration
+# Constants
 # -------------------------
-tru_connector = SnowflakeConnector(snowpark_session=session)
-tru_session = TruSession(connector=tru_connector)
+IRS_COLORS = {
+    "primary": "#004b87",
+    "secondary": "#ffffff",
+    "accent": "#ffd700"
+}
 
-# -------------------------
-# RAG Implementation
-# -------------------------
-class TaxAdvisorRAG:
-    def __init__(self):
-        self.retriever = self.setup_retriever()
-    
-    def setup_retriever(self):
-        return session.sql(f"""
-            SELECT * 
-            FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE 
-            LIMIT 3
-        """).collect()
-    
-    @instrument
-    def retrieve_context(self, query: str) -> list:
-        """
-        Retrieve relevant text from the IRS documents.
-        """
-        if st.session_state.category_value == "ALL":
-            response = session.sql(f"""
-                SELECT * 
-                FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE 
-                LIMIT 3
-            """).collect()
-        else:
-            response = session.sql(f"""
-                SELECT * 
-                FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE 
-                WHERE category = '{st.session_state.category_value}' 
-                LIMIT 3
-            """).collect()
-        return response
-
-    @instrument
-    def generate_completion(self, query: str, context_str: list) -> str:
-        """
-        Generate a response using the context retrieved from IRS documents.
-        """
-        prompt = f"""
-        You are an expert IRS tax assistant with a deep understanding of IRS guidelines and general U.S. tax laws.
-
-        CONTEXT:
-        {context_str}
-
-        QUESTION:
-        {query}
-
-        INSTRUCTIONS:
-        - Provide clear, concise, and authoritative answers.
-        - Recommend IRS forms or publications if applicable.
-        - If the context doesn't have sufficient information, rely on general IRS knowledge.
-        - If the nationality is Canadian, please cross reference CRA knowledge with IRS knowledge. 
-        
-        """
-        cmd = "SELECT snowflake.cortex.complete(?, ?) AS response"
-        df_response = session.sql(cmd, params=[st.session_state.model_name, prompt]).collect()
-        return df_response[0]['RESPONSE']
-
-    @instrument
-    def query(self, query: str) -> str:
-        """
-        Complete the query using retrieved context.
-        """
-        context = self.retrieve_context(query)
-        context_str = "\n\n".join([row.CHUNK for row in context])
-        return self.generate_completion(query, context_str)
-
-
-# Instantiate RAG
-rag = TaxAdvisorRAG()
-
-# -------------------------
-# Feedback Functions
-# -------------------------
-provider = Cortex(session.connection, "mistral-large")
-
-f_groundedness = (
-    Feedback(provider.groundedness_measure_with_cot_reasons, name="Groundedness")
-    .on(Select.RecordCalls.retrieve_context.rets[:].collect())
-    .on_output()
-)
-
-f_context_relevance = (
-    Feedback(provider.context_relevance, name="Context Relevance")
-    .on_input()
-    .on(Select.RecordCalls.retrieve_context.rets[:])
-    .aggregate(np.mean)
-)
-
-f_answer_relevance = (
-    Feedback(provider.relevance, name="Answer Relevance")
-    .on_input()
-    .on_output()
-    .aggregate(np.mean)
-)
-
-# Register Feedback with TruLens
-tru_rag = TruCustomApp(
-    rag,
-    app_name="MoneyForNothin",
-    app_version="v1",
-    feedbacks=[f_groundedness, f_answer_relevance, f_context_relevance],
-)
+NUM_CHUNKS = 3
+COLUMNS = ["chunk", "relative_path", "category"]
 
 # -------------------------
 # Sidebar Configuration
@@ -175,6 +69,86 @@ def config_options():
     st.sidebar.checkbox('Use document context?', key='use_context')
 
 # -------------------------
+# Retrieval Logic
+# -------------------------
+def get_similar_chunks(query):
+    try:
+        if st.session_state.category_value == "ALL":
+            response = session.sql(f"""
+                SELECT * 
+                FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE 
+                LIMIT {NUM_CHUNKS}
+            """).collect()
+        else:
+            response = session.sql(f"""
+                SELECT * 
+                FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE 
+                WHERE category = '{st.session_state.category_value}' 
+                LIMIT {NUM_CHUNKS}
+            """).collect()
+        return response
+    except Exception as e:
+        st.error(f"Failed to retrieve document chunks: {e}")
+        return []
+
+# -------------------------
+# Prompt Creation
+# -------------------------
+def create_prompt(question, context_response):
+    if context_response:
+        prompt_context = "\n\n".join([row.CHUNK for row in context_response])
+        prompt = f"""
+        You are an expert IRS tax assistant with a deep understanding of IRS guidelines and general U.S. tax laws.
+        
+        Below is CONTEXT extracted from IRS documents. Use it to assist in answering the QUESTION. 
+        If the context does not fully answer the question, rely on your general knowledge of U.S. tax regulations.
+
+        CONTEXT:
+        {prompt_context}
+
+        QUESTION:
+        {question}
+
+        INSTRUCTIONS:
+        - Provide clear, concise, and authoritative answers.
+        - Do not invent information.
+        - If relevant, recommend IRS forms or publications.
+        - If context is insufficient, fall back on your expert knowledge of the IRS taxation system.
+        - If the nationality is Canadian, research the CRA website and the IRS website to provide a response.
+
+        Answer:
+        """
+    else:
+        prompt = f"""
+        You are an expert IRS tax assistant with a deep understanding of IRS guidelines and general U.S. tax laws.
+
+        QUESTION:
+        {question}
+
+        INSTRUCTIONS:
+        - Provide clear, concise, and authoritative answers.
+        - If relevant, recommend IRS forms or publications.
+
+        Answer:
+        """
+    
+    return prompt
+
+# -------------------------
+# Completion Logic
+# -------------------------
+def complete(question):
+    try:
+        context_response = get_similar_chunks(question)
+        prompt = create_prompt(question, context_response)
+        cmd = "SELECT snowflake.cortex.complete(?, ?) AS response"
+        df_response = session.sql(cmd, params=[st.session_state.model_name, prompt]).collect()
+        return df_response[0]['RESPONSE']
+    except Exception as e:
+        st.error(f"Failed to generate a response: {e}")
+        return "Sorry, there was an error processing your question."
+
+# -------------------------
 # Main App
 # -------------------------
 def main():
@@ -182,30 +156,29 @@ def main():
     st.markdown("*And Your Tax Advice For Free*")
     st.write("Ask tax-related questions and receive accurate answers sourced directly from IRS documents.")
     
+    # Sidebar Configurations
     config_options()
     
+    # Chat Interface
     question = st.text_input("Ask a tax-related question:", placeholder="Enter your question here")
     
     if question:
-        with tru_rag as recording:
-            with st.spinner("Processing your question..."):
-                response = rag.query(question)
-            
-            st.subheader("Response")
-            st.write(response)
-            
-            if st.session_state.use_context:
-                st.subheader("Relevant IRS Publication")
-                similar_chunks = rag.retrieve_context(question)
-                for chunk in similar_chunks:
+        with st.spinner("Processing your question..."):
+            response = complete(question)
+        
+        st.subheader("Response")
+        st.write(response)
+        
+        if st.session_state.use_context:
+            st.subheader("Relevant IRS Publication")
+            similar_chunks = get_similar_chunks(question)
+            for chunk in similar_chunks:
+                try:
                     cmd = f"SELECT GET_PRESIGNED_URL(@docs, '{chunk.relative_path}', 360) AS URL_LINK"
                     df_url = session.sql(cmd).to_pandas()
                     st.markdown(f"[Read the full IRS Publication here]({df_url.iloc[0]['URL_LINK']})")
-
-    # Show TruLens Leaderboard
-    leaderboard = tru_session.get_leaderboard()
-    st.subheader("TruLens Leaderboard")
-    st.write(leaderboard)
+                except Exception as e:
+                    st.error(f"Failed to generate document link: {e}")
 
 # -------------------------
 # Run the App
