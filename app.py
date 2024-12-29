@@ -2,6 +2,8 @@ import streamlit as st
 from snowflake.snowpark import Session
 import pandas as pd
 import json
+import os
+import threading
 from trulens.core import Tru
 from trulens.feedback.llm_provider import LLMProvider
 
@@ -10,7 +12,6 @@ from trulens.feedback.llm_provider import LLMProvider
 # -------------------------
 st.set_page_config(
     page_title="Money for Nothin",
-    page_icon="",
     layout="wide"
 )
 
@@ -18,7 +19,7 @@ st.set_page_config(
 # Initialize TruLens
 # -------------------------
 tru = Tru()
-provider = LLMProvider(model_engine="mistral-large2")  # Default model set to mistral-large2
+provider = LLMProvider()
 
 # -------------------------
 # Snowflake Connection
@@ -35,7 +36,6 @@ def get_session():
         "role": st.secrets["snowflake"]["role"]
     }).create()
 
-
 session = get_session()
 
 # -------------------------
@@ -47,7 +47,7 @@ IRS_COLORS = {
     "accent": "#ffd700"
 }
 
-NUM_CHUNKS = 5
+NUM_CHUNKS = 3
 COLUMNS = ["chunk", "relative_path", "category"]
 
 # -------------------------
@@ -59,8 +59,7 @@ def config_options():
     st.sidebar.subheader("Model Selection")
     st.sidebar.selectbox(
         'Choose your model:',
-        ['mistral-large2', 'mistral-7b', 'mistral-large'],
-        index=0,  # Default to 'mistral-large2'
+        ['mistral-7b', 'mistral-large', 'mistral-large2'],
         key="model_name"
     )
     
@@ -75,7 +74,14 @@ def config_options():
     
     st.sidebar.subheader("Context Toggle")
     st.sidebar.checkbox('Use document context?', key='use_context')
-
+    
+    st.sidebar.subheader("Data Source")
+    data_source = st.sidebar.radio(
+        "Choose Data Source:",
+        ["IRS Data Only", "W-2 Data Only", "Both"]
+    )
+    
+    return data_source
 
 # -------------------------
 # Retrieval Logic
@@ -83,46 +89,65 @@ def config_options():
 def get_similar_chunks(query):
     if st.session_state.category_value == "ALL":
         response = session.sql(f"""
-            SELECT chunk, relative_path, category 
+            SELECT * 
             FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE 
             LIMIT {NUM_CHUNKS}
         """).collect()
     else:
         response = session.sql(f"""
-            SELECT chunk, relative_path, category 
+            SELECT * 
             FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE 
             WHERE category = '{st.session_state.category_value}' 
             LIMIT {NUM_CHUNKS}
         """).collect()
-    
     return response
-
 
 # -------------------------
 # Prompt Creation
 # -------------------------
 def create_prompt(question):
     context_response = get_similar_chunks(question)
+    
     if context_response:
         prompt_context = "\n\n".join([row.CHUNK for row in context_response])
         prompt = f"""
-        You are an IRS tax assistant with expertise in IRS documentation and tax guidelines.
-        Below is some CONTEXT from IRS documents. Use it to answer the QUESTION.
+        You are an expert IRS tax assistant with a deep understanding of IRS guidelines and general U.S. tax laws.
         
+        Below is CONTEXT extracted from IRS documents. Use it to assist in answering the QUESTION. 
+        If the context does not fully answer the question, rely on your general knowledge of U.S. tax regulations.
+
         CONTEXT:
         {prompt_context}
-        
+
         QUESTION:
         {question}
-        
-        Please provide clear, concise, and accurate information based on the context provided.
-        If relevant, suggest specific IRS forms or publications.
+
+        INSTRUCTIONS:
+        - Provide clear, concise, and authoritative answers.
+        - Do not invent information.
+        - If relevant, recommend IRS forms or publications.
+        - If context is insufficient, fall back on your expert knowledge of the IRS taxation system.
+        - If the nationality is Canadian research the CRA website and the IRS website to provide a response.
+
+
+
+        Answer:
         """
     else:
-        prompt = f"Question: {question}\nAnswer: I'm sorry, but no relevant information was found in the context."
+        prompt = f"""
+        You are an expert IRS tax assistant with a deep understanding of IRS guidelines and general U.S. tax laws.
+
+        QUESTION:
+        {question}
+
+        INSTRUCTIONS:
+        - Provide clear, concise, and authoritative answers.
+        - If relevant, recommend IRS forms or publications.
+
+        Answer:
+        """
     
     return prompt
-
 
 # -------------------------
 # Completion Logic
@@ -131,43 +156,47 @@ def complete(question):
     prompt = create_prompt(question)
     cmd = "SELECT snowflake.cortex.complete(?, ?) AS response"
     df_response = session.sql(cmd, params=[st.session_state.model_name, prompt]).collect()
-    
-    if not df_response:
-        return "No valid response received from the model."
-    
     return df_response[0]['RESPONSE']
-
 
 # -------------------------
 # TruLens Logging
 # -------------------------
-def log_to_trulens(question, response):
+def log_to_trulens(question, response, data_source):
     try:
         tru.add_record(
-            app_id="moneyfornothin_app",  # Unique identifier for your app
+            app_id="moneyfornothin_app",
             inputs={"question": question},
             outputs={"response": response},
             metadata={
                 "model": st.session_state.model_name,
                 "use_context": st.session_state.use_context,
-                "category": st.session_state.category_value
+                "category": st.session_state.category_value,
+                "data_source": data_source
             },
-            calls=[{"input": question, "output": response}]
+            calls=[
+                {
+                    "input": question,
+                    "output": response,
+                    "stack": "streamlit_app",
+                    "args": {},
+                    "pid": os.getpid(),
+                    "tid": threading.get_ident()
+                }
+            ]
         )
     except Exception as e:
         st.error(f"TruLens Logging Failed: {e}")
-
 
 # -------------------------
 # Main App
 # -------------------------
 def main():
     st.title("Money for Nothin")
-    st.markdown("*_And Your Tax Advice for Free_*")
+    st.markdown("*And Your Tax Advice For Free*")
     st.write("Ask tax-related questions and receive accurate answers sourced directly from IRS documents.")
     
     # Sidebar Configurations
-    config_options()
+    data_source = config_options()
     
     # Chat Interface
     question = st.text_input("Ask a tax-related question:", placeholder="Enter your question here")
@@ -179,10 +208,8 @@ def main():
         st.subheader("Response")
         st.write(response)
         
-        # Log to TruLens
-        log_to_trulens(question, response)
+        log_to_trulens(question, response, data_source)
         
-        # Show Related Document Links
         if st.session_state.use_context:
             st.subheader("Relevant IRS Publication")
             similar_chunks = get_similar_chunks(question)
@@ -190,7 +217,6 @@ def main():
                 cmd = f"SELECT GET_PRESIGNED_URL(@docs, '{chunk.relative_path}', 360) AS URL_LINK"
                 df_url = session.sql(cmd).to_pandas()
                 st.markdown(f"[Read the full IRS Publication here]({df_url.iloc[0]['URL_LINK']})")
-
 
 # -------------------------
 # Run the App
