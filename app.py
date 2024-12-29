@@ -6,6 +6,7 @@ import os
 import threading
 from trulens.core import Tru
 from trulens.feedback.llm_provider import LLMProvider
+from trulens.feedback.provider.mistral import Mistral
 
 # -------------------------
 # Page Configuration
@@ -16,10 +17,15 @@ st.set_page_config(
 )
 
 # -------------------------
-# Initialize TruLens
+# Initialize TruLens with Mistral
 # -------------------------
 tru = Tru()
-provider = LLMProvider()
+provider = LLMProvider(
+    llm=Mistral(
+        api_key="I8JjRl93ZLqCjuHh0mKVcNqigOvSgyFf"
+    ),
+    model_engine="mistral-large-2"
+)
 
 # -------------------------
 # Snowflake Connection
@@ -128,8 +134,6 @@ def create_prompt(question):
         - If relevant, recommend IRS forms or publications.
         - If context is insufficient, fall back on your expert knowledge of the IRS taxation system.
         - If the nationality is Canadian research the CRA website and the IRS website to provide a response.
-
-
 
         Answer:
         """
