@@ -1,0 +1,20 @@
+## Test Prompts 
+prompts = [
+    "What are the tax obligations for a Canadian living in the US?",
+    "How do I claim the Foreign Earned Income Exclusion?",
+    "What IRS forms do I need to file as a self-employed individual?",
+    "How can I check my IRS refund status?",
+    "What deductions can I claim as a freelancer?",
+    "How do I report foreign bank accounts to the IRS?",
+    "What is the difference between a 1040 and a 1040-NR form?",
+    "How do I file taxes if I am on a visa in the US?",
+    "What are the penalties for late IRS filings?",
+    "How do I apply for an IRS payment plan?",
+    "Which IRS form should I use for capital gains taxes?",
+    "How do I determine my IRS filing status?",
+    "Can I deduct home office expenses on my IRS tax return?",
+    "What tax credits are available for higher education expenses?",
+    "How do I handle IRS audits?",
+    "What is the IRS standard deduction for 2024?",
+    "Are medical expenses tax-deductible in the US?",
+]

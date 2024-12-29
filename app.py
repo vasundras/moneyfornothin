@@ -1,9 +1,17 @@
-import streamlit as st
-from snowflake.snowpark import Session
-import pandas as pd
-import json
-import os
-import threading
+import streamlit as st  # UI Framework
+from snowflake.snowpark.context import get_active_session  # Snowpark Session Management
+from snowflake.cortex import Complete  # Direct Cortex LLM API
+import pandas as pd  # Data Manipulation
+import json  # JSON Parsing
+
+# -------------------------
+# Initialize Session State Defaults
+# -------------------------
+st.session_state.setdefault('model_name', 'mistral-large2')
+st.session_state.setdefault('category_value', 'ALL')
+st.session_state.setdefault('use_context', False)
+st.session_state.setdefault('chat_history', [])
+st.session_state.setdefault('slide_window', 5)  # Number of messages to keep in the window
 
 # -------------------------
 # Page Configuration
@@ -16,32 +24,8 @@ st.set_page_config(
 # -------------------------
 # Snowflake Connection
 # -------------------------
-@st.cache_resource
-def get_session():
-    return Session.builder.configs({
-        "account": st.secrets["snowflake"]["account"],
-        "user": st.secrets["snowflake"]["user"],
-        "password": st.secrets["snowflake"]["password"],
-        "warehouse": st.secrets["snowflake"]["warehouse"],
-        "database": st.secrets["snowflake"]["database"],
-        "schema": st.secrets["snowflake"]["schema"],
-        "role": st.secrets["snowflake"]["role"]
-    }).create()
-
-
-session = get_session()
-
-# -------------------------
-# Constants
-# -------------------------
-IRS_COLORS = {
-    "primary": "#004b87",
-    "secondary": "#ffffff",
-    "accent": "#ffd700"
-}
-
-NUM_CHUNKS = 3
-COLUMNS = ["chunk", "relative_path", "category"]
+# Establish Snowflake session
+session = get_active_session()
 
 # -------------------------
 # Sidebar Configuration
@@ -49,136 +33,177 @@ COLUMNS = ["chunk", "relative_path", "category"]
 def config_options():
     st.sidebar.title("Configuration")
     
+    # Model Selection
     st.sidebar.subheader("Model Selection")
-    st.sidebar.selectbox(
+    selected_model = st.sidebar.selectbox(
         'Choose your model:',
-        ['mistral-7b', 'mistral-large', 'mistral-large2'],
-        key="model_name"
+        ['mistral-large2', 'mistral-large', 'mistral-7b'],
+        index=['mistral-large2', 'mistral-large', 'mistral-7b'].index(st.session_state.model_name)
     )
+    st.session_state.model_name = selected_model
     
+    # Category Filter
     st.sidebar.subheader("Category Filter")
-    categories = session.sql("SELECT DISTINCT category FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE").collect()
-    cat_list = ['ALL'] + [cat.CATEGORY for cat in categories]
-    st.sidebar.selectbox(
+    try:
+        categories = session.sql(
+            "SELECT DISTINCT category FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE"
+        ).collect()
+        cat_list = ['ALL'] + [cat['CATEGORY'] for cat in categories]
+    except Exception as e:
+        st.sidebar.error(f"Failed to load categories: {e}")
+        cat_list = ['ALL']
+    
+    selected_category = st.sidebar.selectbox(
         'Select a category:',
         cat_list,
-        key="category_value"
+        index=0
     )
+    st.session_state.category_value = selected_category
     
+    # Context Toggle
     st.sidebar.subheader("Context Toggle")
-    st.sidebar.checkbox('Use document context?', key='use_context')
+    st.session_state.use_context = st.sidebar.checkbox('Use document context?', value=st.session_state.use_context)
+    
+    # Debug Toggle
+    st.sidebar.subheader("Debug Toggle")
+    st.session_state.debug = st.sidebar.checkbox('Enable Debug Mode', value=False)
 
 # -------------------------
-# Retrieval Logic
+# Chat History Functions
 # -------------------------
-def get_similar_chunks(query):
+def get_chat_history():
+    """
+    Returns the last N messages from the chat history.
+    """
+    start_index = max(0, len(st.session_state.chat_history) - st.session_state.slide_window)
+    return st.session_state.chat_history[start_index:]
+
+def summarize_question_with_history(chat_history, question):
+    """
+    Summarizes the previous chat history and the current question.
+    """
+    prompt = f"""
+    Summarize the following chat history and question to form a concise query:
+    CHAT HISTORY: {chat_history}
+    QUESTION: {question}
+    """
+    try:
+        summary = Complete(model=st.session_state.model_name, prompt=prompt)
+        return summary
+    except Exception as e:
+        st.error(f"Failed to summarize question with history: {e}")
+        return question
+
+# -------------------------
+# Context Retrieval
+# -------------------------
+def get_similar_chunks_search_service(query):
+    """
+    Retrieve similar chunks from IRS_PUBS_CORTEX_SEARCH_DOCS.
+    """
     try:
         if st.session_state.category_value == "ALL":
             response = session.sql(f"""
                 SELECT * 
                 FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE 
-                LIMIT {NUM_CHUNKS}
+                LIMIT 3
             """).collect()
         else:
             response = session.sql(f"""
                 SELECT * 
                 FROM IRS_PUBS_CORTEX_SEARCH_DOCS.DATA.DOCS_CHUNKS_TABLE 
-                WHERE category = '{st.session_state.category_value}' 
-                LIMIT {NUM_CHUNKS}
+                WHERE category = '{st.session_state.category_value}'
+                LIMIT 3
             """).collect()
+        
         return response
     except Exception as e:
-        st.error(f"Failed to retrieve document chunks: {e}")
+        st.error(f"Failed to retrieve similar chunks: {e}")
         return []
 
 # -------------------------
 # Prompt Creation
 # -------------------------
-def create_prompt(question, context_response):
-    if context_response:
-        prompt_context = "\n\n".join([row.CHUNK for row in context_response])
-        prompt = f"""
-        You are an expert IRS tax assistant with a deep understanding of IRS guidelines and general U.S. tax laws.
-        
-        Below is CONTEXT extracted from IRS documents. Use it to assist in answering the QUESTION. 
-        If the context does not fully answer the question, rely on your general knowledge of U.S. tax regulations.
-
-        CONTEXT:
-        {prompt_context}
-
-        QUESTION:
-        {question}
-
-        INSTRUCTIONS:
-        - Provide clear, concise, and authoritative answers.
-        - Do not invent information.
-        - If relevant, recommend IRS forms or publications.
-        - If context is insufficient, fall back on your expert knowledge of the IRS taxation system.
-        - If the nationality is Canadian, research the CRA website and the IRS website to provide a response.
-
-        Answer:
-        """
-    else:
-        prompt = f"""
-        You are an expert IRS tax assistant with a deep understanding of IRS guidelines and general U.S. tax laws.
-
-        QUESTION:
-        {question}
-
-        INSTRUCTIONS:
-        - Provide clear, concise, and authoritative answers.
-        - If relevant, recommend IRS forms or publications.
-
-        Answer:
-        """
+def create_prompt(question):
+    """
+    Creates the final LLM prompt using history, context, and the question.
+    """
+    chat_history = get_chat_history()
     
-    return prompt
+    if chat_history:
+        question_summary = summarize_question_with_history(chat_history, question)
+        context_chunks = get_similar_chunks_search_service(question_summary)
+    else:
+        context_chunks = get_similar_chunks_search_service(question)
+    
+    prompt_context = "\n\n".join([row.CHUNK for row in context_chunks])
+    relative_paths = set(row.RELATIVE_PATH for row in context_chunks)
+    
+    prompt = f"""
+    You are an expert IRS tax assistant with a deep understanding of IRS guidelines and general U.S. tax laws.
+    
+    CONTEXT:
+    {prompt_context}
+
+    QUESTION:
+    {question}
+
+    INSTRUCTIONS:
+    - Provide clear, concise, and authoritative answers.
+    - Do not invent information.
+    - If relevant, recommend IRS forms or publications.
+    - If context is insufficient, fall back on your expert knowledge.
+    """
+    return prompt, relative_paths
 
 # -------------------------
-# Completion Logic
+# Answer Generation
 # -------------------------
-def complete(question):
+def answer_question(question):
+    """
+    Generate a response from the LLM.
+    """
+    prompt, relative_paths = create_prompt(question)
     try:
-        context_response = get_similar_chunks(question)
-        prompt = create_prompt(question, context_response)
-        cmd = "SELECT snowflake.cortex.complete(?, ?) AS response"
-        df_response = session.sql(cmd, params=[st.session_state.model_name, prompt]).collect()
-        return df_response[0]['RESPONSE']
+        response = Complete(model=st.session_state.model_name, prompt=prompt)
+        return response, relative_paths
     except Exception as e:
-        st.error(f"Failed to generate a response: {e}")
-        return "Sorry, there was an error processing your question."
+        st.error(f"Failed to generate response: {e}")
+        return "Sorry, there was an error processing your question.", []
 
 # -------------------------
 # Main App
 # -------------------------
 def main():
-    st.title("Money for Nothin")
-    st.markdown("*And Your Tax Advice For Free*")
-    st.write("Ask tax-related questions and receive accurate answers sourced directly from IRS documents.")
+    st.title(":speech_balloon: Chat Document Assistant with Snowflake Cortex")
+    st.write("Ask questions and receive accurate IRS tax advice using Snowflake Cortex and document search.")
     
-    # Sidebar Configurations
     config_options()
     
-    # Chat Interface
-    question = st.text_input("Ask a tax-related question:", placeholder="Enter your question here")
+    # Display chat history
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
     
-    if question:
-        with st.spinner("Processing your question..."):
-            response = complete(question)
+    # User Input
+    if question := st.chat_input("What do you want to know about IRS guidelines?"):
+        st.session_state.chat_history.append({"role": "user", "content": question})
         
-        st.subheader("Response")
-        st.write(response)
+        with st.chat_message("user"):
+            st.markdown(question)
         
-        if st.session_state.use_context:
-            st.subheader("Relevant IRS Publication")
-            similar_chunks = get_similar_chunks(question)
-            for chunk in similar_chunks:
-                try:
-                    cmd = f"SELECT GET_PRESIGNED_URL(@docs, '{chunk.relative_path}', 360) AS URL_LINK"
-                    df_url = session.sql(cmd).to_pandas()
-                    st.markdown(f"[Read the full IRS Publication here]({df_url.iloc[0]['URL_LINK']})")
-                except Exception as e:
-                    st.error(f"Failed to generate document link: {e}")
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            with st.spinner("Thinking..."):
+                response, relative_paths = answer_question(question)
+                message_placeholder.markdown(response)
+                
+                if relative_paths:
+                    with st.sidebar.expander("Related Documents"):
+                        for path in relative_paths:
+                            st.sidebar.markdown(f"📄 [Document Link: {path}](#)")
+        
+        st.session_state.chat_history.append({"role": "assistant", "content": response})
 
 # -------------------------
 # Run the App
